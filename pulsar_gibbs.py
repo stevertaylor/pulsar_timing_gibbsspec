@@ -31,7 +31,7 @@ class PTABlockGibbs(object):
     
     Example usage:
     
-        > gibbs = PTABlockGibbs(pta, hypersample='conditional')
+        > gibbs = PTABlockGibbs(pta, hypersample='conditional', ecorrsample='mh', psr=psr)
         > x0 = x0 = np.concatenate([p.sample().flatten() for p in gibbs.params])
         > gibbs.sample(x0, outdir='./', 
                        niter=10000, resume=False)
@@ -49,6 +49,11 @@ class PTABlockGibbs(object):
         hypersample: string
             method to draw free spectral coefficients from conditional posterior
             ('conditional' = analytic; 'mh' = short MCMC chain)
+        ecorrsample: string
+            method to draw ECORR coefficients from conditional posterior
+            ('conditional' = analytic; 'mh' = short MCMC chain)
+        psr: enterprise pulsar object
+            pass an enterprise pulsar object to get ecorr selections
         """
 
         self.pta = pta
@@ -79,16 +84,10 @@ class PTABlockGibbs(object):
         self.rhomin, self.rhomax = (10**(2*float(rho_priors[0].split('=')[1])), 
                                     10**(2*float(rho_priors[1].split('=')[1])))
         
-        # grabbing priors on ECORR params
-        for ct, par in enumerate([p.name for p in self.params]):
-            if 'ecorr' in par: ind = ct
-        ecorr_priors = str(self.params[ind].params[0])
-        ecorr_priors = ecorr_priors.split('(')[1].split(')')[0].split(', ')
-        self.ecorrmin, self.ecorrmax = (10**(2*float(ecorr_priors[0].split('=')[1])), 
-                                        10**(2*float(ecorr_priors[1].split('=')[1])))
-        
         # find basis indices of GW and ECORR processes
         ct = 0
+        self.gwid = None
+        self.ecid = None
         for sig in self.pta.signals:
             Fmat = self.pta.signals[sig].get_basis()
             if 'gw' in self.pta.signals[sig].name:
@@ -97,13 +96,24 @@ class PTABlockGibbs(object):
                 self.ecid = ct + np.arange(0,Fmat.shape[1])
             if Fmat is not None:
                 ct += Fmat.shape[1]
-                
-        self.Umat = self.pta.get_basis()[0][:,self.ecid]
-        self.sel = selections.by_backend(psr.flags['f'])
-        self.ecorr_inds_sel = []
-        for key in self.sel:
-            inds_sel_tmp = self.Umat[self.sel[key],:]
-            self.ecorr_inds_sel.append(np.where(np.sum(inds_sel_tmp,axis=0)>0.)[0])
+
+        if self.ecid is not None:   
+            # grabbing priors on ECORR params
+            for ct, par in enumerate([p.name for p in self.params]):
+                if 'ecorr' in par: ind = ct
+            ecorr_priors = str(self.params[ind].params[0])
+            ecorr_priors = ecorr_priors.split('(')[1].split(')')[0].split(', ')
+            self.ecorrmin, self.ecorrmax = (10**(2*float(ecorr_priors[0].split('=')[1])), 
+                                            10**(2*float(ecorr_priors[1].split('=')[1])))
+
+            # find ECORR epochs covered by each selection
+            self.Umat = self.pta.get_basis()[0][:,self.ecid]
+            self.sel = selections.by_backend(psr.flags['f'])
+            self.ecorr_inds_sel = []
+            for key in self.sel:
+                inds_sel_tmp = self.Umat[self.sel[key],:]
+                self.ecorr_inds_sel.append(np.where(np.sum(inds_sel_tmp,axis=0)>0.)[0])
+
                        
     @property
     def params(self):
@@ -164,6 +174,8 @@ class PTABlockGibbs(object):
 
         xnew = xs.copy()
         if self.hypersample == 'conditional':
+            # draw variance values analytically,
+            # a la van Haasteren & Vallisneri (2014)
             
             tau = self._b[self.gwid]**2
             tau = (tau[::2] + tau[1::2]) / 2
@@ -531,16 +543,18 @@ class PTABlockGibbs(object):
             self.d = None
 
             # update efac/equad parameters
-            if ii==0:
-                xnew = self.update_white_params(xnew, iters=1000)
-            else:
-                xnew = self.update_white_params(xnew, iters=None)
+            if self.get_efacequad_indices().size != 0:
+                if ii==0:
+                    xnew = self.update_white_params(xnew, iters=1000)
+                else:
+                    xnew = self.update_white_params(xnew, iters=None)
             
             # update ecorr parameters
-            if ii==0:
-                xnew = self.update_ecorr_params(xnew, iters=1000)
-            else:
-                xnew = self.update_ecorr_params(xnew, iters=None)
+            if self.get_ecorr_indices().size != 0:
+                if ii==0:
+                    xnew = self.update_ecorr_params(xnew, iters=1000)
+                else:
+                    xnew = self.update_ecorr_params(xnew, iters=None)
 
             # update hyper-parameters
             xnew = self.update_hyper_params(xnew)
