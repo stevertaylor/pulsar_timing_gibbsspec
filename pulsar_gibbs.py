@@ -86,6 +86,7 @@ class PulsarBlockGibbs(object):
         
         # find basis indices of GW and ECORR processes
         ct = 0
+        self.b_param_names = []
         self.gwid = None
         self.ecid = None
         for sig in self.pta.signals:
@@ -94,8 +95,16 @@ class PulsarBlockGibbs(object):
                 self.gwid = ct + np.arange(0,Fmat.shape[1])
             if 'ecorr' in self.pta.signals[sig].name:
                 self.ecid = ct + np.arange(0,Fmat.shape[1])
-            if Fmat is not None:
+            # Avoid None-basis processes.
+            # Also assume red + GW signals share basis.
+            if Fmat is not None and 'red' not in sig:
                 ct += Fmat.shape[1]
+                self.b_param_names += [sig+'_'+str(ii) 
+                                      for ii in range(Fmat.shape[1])]
+        if ct == self.pta.get_basis()[0].shape[1]:
+            print('Basis count is good')
+        else:
+            print('WARNING: Miscounted basis entries. Maybe red noise and GW do not share a design matrix.')
 
         if self.ecid is not None:   
             # grabbing priors on ECORR params
@@ -115,6 +124,7 @@ class PulsarBlockGibbs(object):
                     inds_sel_tmp = self.Umat[self.sel[key],:]
                     self.ecorr_inds_sel.append(np.where(np.sum(inds_sel_tmp,axis=0)>0.)[0])
 
+        # identify intrinsic red noise signals
         self.red_sig = None
         for sig in self.pta.signals:
             if 'red' in self.pta.signals[sig].name:
@@ -612,6 +622,9 @@ class PulsarBlockGibbs(object):
 
         print(f'Creating chain directory: {outdir}')
         os.system(f'mkdir -p {outdir}')
+
+        np.savetxt(f'{outdir}/pars_chain.txt', self.param_names, fmt="%s")
+        np.savetxt(f'{outdir}/pars_bchain.txt', self.b_param_names, fmt="%s")
         
         self.chain = np.zeros((niter, len(xs)))
         self.bchain = np.zeros((niter, len(self._b)))
