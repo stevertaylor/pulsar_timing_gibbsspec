@@ -184,7 +184,7 @@ class PulsarBlockGibbs(object):
     def update_gwrho_params(self, xs):
 
         # get hyper parameter indices
-        gwind = self.get_rho_param_indices()
+        gwind = self.get_gwrho_param_indices()
 
         xnew = xs.copy()
         if self.hypersample == 'conditional':
