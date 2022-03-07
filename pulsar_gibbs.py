@@ -11,7 +11,7 @@ import enterprise
 from enterprise.signals import selections
 
 
-class PTABlockGibbs(object):
+class PTABlockGibbs2(object):
     
     """Gibbs-based pulsar-timing periodogram analysis.
     
@@ -78,7 +78,7 @@ class PTABlockGibbs(object):
         
         # grabbing priors on free spectral power values
         for ct, par in enumerate([p.name for p in self.params]):
-            if 'rho' in par: ind = ct
+            if 'rho' in par and 'gw' in par: ind = ct
         rho_priors = str(self.params[ind].params[0])
         rho_priors = rho_priors.split('(')[1].split(')')[0].split(', ')
         self.rhomin, self.rhomax = (10**(2*float(rho_priors[0].split('=')[1])), 
@@ -107,12 +107,18 @@ class PTABlockGibbs(object):
                                             10**(2*float(ecorr_priors[1].split('=')[1])))
 
             # find ECORR epochs covered by each selection
-            self.Umat = self.pta.get_basis()[0][:,self.ecid]
-            self.sel = selections.by_backend(psr.flags['f'])
-            self.ecorr_inds_sel = []
-            for key in self.sel:
-                inds_sel_tmp = self.Umat[self.sel[key],:]
-                self.ecorr_inds_sel.append(np.where(np.sum(inds_sel_tmp,axis=0)>0.)[0])
+            if self.ecorrsample == 'conditional':
+                self.Umat = self.pta.get_basis()[0][:,self.ecid]
+                self.sel = selections.by_backend(psr.flags['f'])
+                self.ecorr_inds_sel = []
+                for key in self.sel:
+                    inds_sel_tmp = self.Umat[self.sel[key],:]
+                    self.ecorr_inds_sel.append(np.where(np.sum(inds_sel_tmp,axis=0)>0.)[0])
+
+        self.red_sig = None
+        for sig in self.pta.signals:
+            if 'red' in self.pta.signals[sig].name:
+                self.red_sig = self.pta.signals[sig]
 
                        
     @property
@@ -143,10 +149,18 @@ class PTABlockGibbs(object):
         return ret
 
 
-    def get_hyper_param_indices(self):
+    def get_gwrho_param_indices(self):
         ind = []
         for ct, par in enumerate(self.param_names):
-            if 'log10_A' in par or 'gamma' in par or 'rho' in par:
+            if 'rho' in par:
+                ind.append(ct)
+        return np.array(ind)
+
+
+    def get_red_param_indices(self):
+        ind = []
+        for ct, par in enumerate(self.param_names):
+            if 'log10_A' in par or 'gamma' in par:
                 ind.append(ct)
         return np.array(ind)
 
@@ -167,23 +181,50 @@ class PTABlockGibbs(object):
         return np.array(ind)
 
 
-    def update_hyper_params(self, xs):
+    def update_gwrho_params(self, xs):
 
         # get hyper parameter indices
-        hind = self.get_hyper_param_indices()
+        gwind = self.get_rho_param_indices()
 
         xnew = xs.copy()
         if self.hypersample == 'conditional':
-            # draw variance values analytically,
-            # a la van Haasteren & Vallisneri (2014)
-            
-            tau = self._b[self.gwid]**2
-            tau = (tau[::2] + tau[1::2]) / 2
-            
-            eta = np.random.uniform(0, 1-np.exp((tau/self.rhomax) - (tau/self.rhomin)))
-            rhonew = tau / ((tau/self.rhomax) - np.log(1-eta))
-            
-            xnew[hind] = 0.5*np.log10(rhonew)
+
+            if self.red_sig is None:
+                # draw variance values analytically,
+                # a la van Haasteren & Vallisneri (2014)
+
+                tau = self._b[self.gwid]**2
+                tau = (tau[::2] + tau[1::2]) / 2
+                
+                eta = np.random.uniform(0, 1-np.exp((tau/self.rhomax) - (tau/self.rhomin)))
+                rhonew = tau / ((tau/self.rhomax) - np.log(1-eta))
+                
+                xnew[gwind] = 0.5*np.log10(rhonew)
+
+            else:
+                # draw variance values from numerical CDF,
+                # based on van Haasteren & Vallisneri (2014)
+
+                tau = self._b[self.gwid]**2
+                tau = tau[::2] + tau[1::2]
+
+                if self.red_sig is not None:
+                    irn = np.array(self.red_sig.get_phi(self.map_params(xnew)))[::2]
+                else:
+                    irn = np.zeros(tau.shape[0])
+                
+                rho_tmp = 10**np.linspace(np.log10(self.rhomin), np.log10(self.rhomax), 1000)
+                ratio = tau[:,None] / np.add.outer(irn, rho_tmp) # np.outer(tau, 1/rho_tmp)
+                pdf = ratio * np.exp(-ratio/2) * np.log(10)
+                cdf = np.cumsum(pdf,axis=1)
+                cdf /= cdf.max(axis=1)[:,None]
+
+                u = np.random.uniform(size=cdf.shape[0])
+                idx = np.array([np.searchsorted(cdf[ii,:], u[ii], side='left') 
+                                for ii in range(u.shape[0])]) - 1
+                rhonew = np.take_along_axis(rho_tmp, idx, axis=0)
+                
+                xnew[gwind] = 0.5*np.log10(rhonew)
           
         else:
             # get initial log-likelihood and log-prior
@@ -193,11 +234,83 @@ class PTABlockGibbs(object):
 
                 # standard gaussian jump (this allows for different step sizes)
                 q = xnew.copy()
-                sigmas = 0.05 * len(hind)
+                sigmas = 0.05 * len(gwind)
                 probs = [0.1, 0.15, 0.5, 0.15, 0.1]
                 sizes = [0.1, 0.5, 1.0, 3.0, 10.0]
                 scale = np.random.choice(sizes, p=probs)
-                par = np.random.choice(hind, size=1) # only one hyper param at a time
+                par = np.random.choice(gwind, size=1) # only one hyper param at a time
+                q[par] += np.random.randn(len(q[par])) * sigmas * scale
+
+                # get log-like and log prior at new position
+                lnlike1, lnprior1 = self.get_lnlikelihood(q), self.get_lnprior(q)
+
+                # metropolis step
+                diff = (lnlike1 + lnprior1) - (lnlike0 + lnprior0)
+                if diff > np.log(np.random.rand()):
+                    xnew = q
+                    lnlike0 = lnlike1
+                    lnprior0 = lnprior1
+                else:
+                    xnew = xnew
+        
+        return xnew
+
+
+    def update_red_params(self, xs, iters=None):
+
+        # get hyper parameter indices
+        rind = self.get_red_param_indices()
+
+        xnew = xs.copy()
+        
+        # get initial log-likelihood and log-prior
+        lnlike0, lnprior0 = self.get_lnlikelihood(xs), self.get_lnprior(xs)
+
+        if iters is not None:
+            
+            short_chain = np.zeros((iters,len(rind)))
+            for ii in range(iters):
+
+                # standard gaussian jump (this allows for different step sizes)
+                q = xnew.copy()
+                sigmas = 0.05 * len(rind)
+                probs = [0.1, 0.15, 0.5, 0.15, 0.1]
+                sizes = [0.1, 0.5, 1.0, 3.0, 10.0]
+                scale = np.random.choice(sizes, p=probs)
+                par = np.random.choice(rind, size=1) # only one hyper param at a time
+                q[par] += np.random.randn(len(q[par])) * sigmas * scale
+
+                # get log-like and log prior at new position
+                lnlike1, lnprior1 = self.get_lnlikelihood(q), self.get_lnprior(q)
+
+                # metropolis step
+                diff = (lnlike1 + lnprior1) - (lnlike0 + lnprior0)
+                if diff > np.log(np.random.rand()):
+                    xnew = q
+                    lnlike0 = lnlike1
+                    lnprior0 = lnprior1
+                else:
+                    xnew = xnew
+
+                short_chain[ii,:] = q[rind]
+
+            self.cov_red = np.cov(short_chain[100:,:],rowvar=False)
+            self.sigma_red = np.diag(self.cov_red)**0.5
+            self.svd_red = np.linalg.svd(self.cov_red)
+            self.aclength_red = int(np.max([int(acor.acor(short_chain[100:,jj])[0]) 
+                                            for jj in range(len(rind))]))
+
+        elif iters is None:
+            
+            for ii in range(self.aclength_red):
+
+                # standard gaussian jump (this allows for different step sizes)
+                q = xnew.copy()
+                sigmas = 0.05 * len(rind)
+                probs = [0.1, 0.15, 0.5, 0.15, 0.1]
+                sizes = [0.1, 0.5, 1.0, 3.0, 10.0]
+                scale = np.random.choice(sizes, p=probs)
+                par = np.random.choice(rind, size=1) # only one hyper param at a time
                 q[par] += np.random.randn(len(q[par])) * sigmas * scale
 
                 # get log-like and log prior at new position
@@ -292,9 +405,9 @@ class PTABlockGibbs(object):
         return xnew
     
     
-    def update_ecorr_params(self, xs, iters=20):
+    def update_ecorr_params(self, xs, iters=None):
 
-        # get white noise parameter indices
+        # get ecorr parameter indices
         eind = self.get_ecorr_indices()
 
         xnew = xs.copy()
@@ -386,9 +499,6 @@ class PTABlockGibbs(object):
 
         # map parameter vector
         params = self.map_params(xs)
-
-        # start likelihood calculations
-        loglike = 0
 
         # get auxiliaries
         Nvec = self.pta.get_ndiag(params)[0]
@@ -551,13 +661,25 @@ class PTABlockGibbs(object):
             
             # update ecorr parameters
             if self.get_ecorr_indices().size != 0:
+                #if self.ecorrsample == 'conditional':
+                #    xnew = self.update_ecorr_params(xnew, iters=None)
+                #else:
                 if ii==0:
                     xnew = self.update_ecorr_params(xnew, iters=1000)
                 else:
                     xnew = self.update_ecorr_params(xnew, iters=None)
 
-            # update hyper-parameters
-            xnew = self.update_hyper_params(xnew)
+            # update red noise parameters
+            if self.get_red_param_indices().size != 0:
+                #xnew = self.update_hyper_params(xnew, iters=None)
+                if ii==0:
+                    xnew = self.update_red_params(xnew, iters=1000)
+                else:
+                    xnew = self.update_red_params(xnew, iters=None)
+
+            # update gw free-spectral hyper-parameters
+            if self.get_gwrho_param_indices().size != 0:
+                xnew = self.update_gwrho_params(xnew)
 
             # if accepted update quadratic params
             if np.all(xnew != self.chain[ii,-1]):

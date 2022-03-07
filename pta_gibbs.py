@@ -11,7 +11,7 @@ import enterprise
 from enterprise.signals import selections
 
 
-class PTABlockGibbs2(object):
+class PTABlockGibbs3(object):
     
     """Gibbs-based pulsar-timing periodogram analysis.
     
@@ -40,7 +40,7 @@ class PTABlockGibbs2(object):
     """
     
     def __init__(self, pta, hypersample='conditional', 
-                 ecorrsample='mh', psr=None):
+                 redsample='mh'):
         """
         Parameters
         -----------
@@ -58,7 +58,7 @@ class PTABlockGibbs2(object):
 
         self.pta = pta
         self.hypersample = hypersample
-        self.ecorrsample = ecorrsample
+        self.redsample = redsample
         if np.any(['basis_ecorr' in key for 
                    key in self.pta._signal_dict.keys()]):
             pass
@@ -66,58 +66,55 @@ class PTABlockGibbs2(object):
             print('ERROR: Gibbs outlier analysis must use basis_ecorr, not kernel ecorr')
 
         # For now assume one pulsar
-        self._residuals = self.pta.get_residuals()[0]
+        self._residuals = self.pta.get_residuals()
 
         # auxiliary variable stuff
         xs = [p.sample() for p in pta.params]
-        self._b = np.zeros(self.pta.get_basis(xs)[0].shape[1])
+        self._b = [np.zeros(self.pta.get_basis(xs)[ii].shape[1]) 
+                    for ii in range(len(self.pta.pulsars))]
 
         # for caching
-        self.TNT = None
-        self.d = None
+        self.TNT = []
+        self.d = []
         
-        # grabbing priors on free spectral power values
+        # grabbing priors on gw free spectral power values
         for ct, par in enumerate([p.name for p in self.params]):
-            if 'rho' in par: ind = ct
+            if 'rho' in par and 'gw' in par: ind = ct
         rho_priors = str(self.params[ind].params[0])
         rho_priors = rho_priors.split('(')[1].split(')')[0].split(', ')
-        self.rhomin, self.rhomax = (10**(2*float(rho_priors[0].split('=')[1])), 
-                                    10**(2*float(rho_priors[1].split('=')[1])))
+        self.rhomin_gw, self.rhomax_gw = (10**(2*float(rho_priors[0].split('=')[1])), 
+                                          10**(2*float(rho_priors[1].split('=')[1])))
+
+        # grabbing priors on gw free spectral power values
+        for ct, par in enumerate([p.name for p in self.params]):
+            if 'rho' in par and 'red' in par: ind = ct
+        rho_priors = str(self.params[ind].params[0])
+        rho_priors = rho_priors.split('(')[1].split(')')[0].split(', ')
+        self.rhomin_red, self.rhomax_red = (10**(2*float(rho_priors[0].split('=')[1])), 
+                                            10**(2*float(rho_priors[1].split('=')[1])))
         
-        # find basis indices of GW and ECORR processes
-        ct = 0
-        self.gwid = None
-        self.ecid = None
-        for sig in self.pta.signals:
-            Fmat = self.pta.signals[sig].get_basis()
-            if 'gw' in self.pta.signals[sig].name:
-                self.gwid = ct + np.arange(0,Fmat.shape[1])
-            if 'ecorr' in self.pta.signals[sig].name:
-                self.ecid = ct + np.arange(0,Fmat.shape[1])
-            if Fmat is not None:
-                ct += Fmat.shape[1]
+        # find basis indices of GW process
+        self.gwid = []
+        for pname in self.pta.pulsars:
+            ct = 0
+            psigs = [sig for sig in self.pta.signals.keys() if pname in sig]
+            for sig in psigs:
+                Fmat = self.pta.signals[sig].get_basis()
+                if 'gw' in self.pta.signals[sig].name:
+                    self.gwid.append(ct + np.arange(0,Fmat.shape[1]))
 
-        if self.ecid is not None:   
-            # grabbing priors on ECORR params
-            for ct, par in enumerate([p.name for p in self.params]):
-                if 'ecorr' in par: ind = ct
-            ecorr_priors = str(self.params[ind].params[0])
-            ecorr_priors = ecorr_priors.split('(')[1].split(')')[0].split(', ')
-            self.ecorrmin, self.ecorrmax = (10**(2*float(ecorr_priors[0].split('=')[1])), 
-                                            10**(2*float(ecorr_priors[1].split('=')[1])))
+                # Avoid None-basis processes.
+                # Also assume red + GW signals share basis.
+                if Fmat is not None and 'red' not in sig:
+                    ct += Fmat.shape[1]
 
-            # find ECORR epochs covered by each selection
-            self.Umat = self.pta.get_basis()[0][:,self.ecid]
-            self.sel = selections.by_backend(psr.flags['f'])
-            self.ecorr_inds_sel = []
-            for key in self.sel:
-                inds_sel_tmp = self.Umat[self.sel[key],:]
-                self.ecorr_inds_sel.append(np.where(np.sum(inds_sel_tmp,axis=0)>0.)[0])
-
-        self.red_sig = None
+        self.red_sig = []
+        self.gw_sig = None
         for sig in self.pta.signals:
             if 'red' in self.pta.signals[sig].name:
-                self.red_sig = self.pta.signals[sig]
+                self.red_sig.append(self.pta.signals[sig])
+            if 'gw' in self.pta.signals[sig].name:
+                self.gw_sig = self.pta.signals[sig]
 
                        
     @property
@@ -151,7 +148,7 @@ class PTABlockGibbs2(object):
     def get_rho_param_indices(self):
         ind = []
         for ct, par in enumerate(self.param_names):
-            if 'rho' in par:
+            if 'rho' in par and 'gw' in par:
                 ind.append(ct)
         return np.array(ind)
 
@@ -159,8 +156,9 @@ class PTABlockGibbs2(object):
     def get_hyper_param_indices(self):
         ind = []
         for ct, par in enumerate(self.param_names):
-            if 'log10_A' in par or 'gamma' in par:
-                ind.append(ct)
+            if 'red' in par:
+                if 'log10_A' in par or 'gamma' in par or 'rho' in par:
+                    ind.append(ct)
         return np.array(ind)
 
 
@@ -187,26 +185,30 @@ class PTABlockGibbs2(object):
 
         xnew = xs.copy()
         if self.hypersample == 'conditional':
-            # draw variance values analytically,
-            # a la van Haasteren & Vallisneri (2014)
-            
-            tau = self._b[self.gwid]**2
-            tau = tau[::2] + tau[1::2]
 
-            if self.red_sig is not None:
-                irn = np.array(self.red_sig.get_phi(self.map_params(xnew)))[::2]
-            else:
-                irn = np.zeros(tau.shape[0])
+            rho_tmp = 10**np.linspace(np.log10(self.rhomin_gw), 
+                                      np.log10(self.rhomax_gw), 1000)
+            pdf = np.zeros((len(rind),len(rho_tmp),len(self.pta.pulsars)))
+            for ii in range(len(self.pta.pulsars)):
             
-            rho_tmp = 10**np.linspace(np.log10(self.rhomin), np.log10(self.rhomax), 1000)
-            ratio = tau[:,None] / np.add.outer(irn, rho_tmp) # np.outer(tau, 1/rho_tmp)
-            pdf = ratio * np.exp(-ratio/2) * np.log(10)
+                tau = self._b[ii][self.gwid[ii]]**2
+                tau = tau[::2] + tau[1::2]
+
+                if self.red_sig:
+                    irn = np.array(self.red_sig[ii].get_phi(self.map_params(xnew)))[::2]
+                else:
+                    irn = np.zeros(tau.shape[0])
+                
+                ratio = tau[:,None] / np.add.outer(irn, rho_tmp)
+                pdf[:,:,ii] = ratio * np.exp(-ratio/2) * np.log(10)
+
+            pdf = np.prod(pdf,axis=2)
             cdf = np.cumsum(pdf,axis=1)
             cdf /= cdf.max(axis=1)[:,None]
 
             u = np.random.uniform(size=cdf.shape[0])
             idx = np.array([np.searchsorted(cdf[ii,:], u[ii], side='left') 
-                            for ii in range(u.shape[0])]) #-1
+                            for ii in range(u.shape[0])]) - 1
             rhonew = np.take_along_axis(rho_tmp, idx, axis=0)
             
             xnew[rind] = 0.5*np.log10(rhonew)
@@ -247,68 +249,95 @@ class PTABlockGibbs2(object):
         hind = self.get_hyper_param_indices()
 
         xnew = xs.copy()
+        if self.redsample == 'conditional':
+
+            rho_red_tmp = 10**np.linspace(np.log10(self.rhomin_red), 
+                                          np.log10(self.rhomax_red), 1000)
+            rhonew = []
+            for ii in range(len(self.pta.pulsars)):
+            
+                tau = self._b[ii][self.gwid[ii]]**2
+                tau = tau[::2] + tau[1::2]
+
+                # should each pulsar call its own gw_sig?
+                gw = np.array(self.gw_sig.get_phi(self.map_params(xnew)))[::2]
+                
+                ratio = tau[:,None] / np.add.outer(gw, rho_red_tmp)
+                pdf = ratio * np.exp(-ratio/2) * np.log(10)
+
+                cdf = np.cumsum(pdf,axis=1)
+                cdf /= cdf.max(axis=1)[:,None]
+
+                u = np.random.uniform(size=cdf.shape[0])
+                idx = np.array([np.searchsorted(cdf[ii,:], u[ii], side='left') 
+                                for ii in range(u.shape[0])]) - 1
+                rhonew.append(np.take_along_axis(rho_red_tmp, idx, axis=0))
+                
+            xnew[hind] = 0.5*np.log10(np.concatenate(rhonew))
+
+        else:
         
-        # get initial log-likelihood and log-prior
-        lnlike0, lnprior0 = self.get_lnlikelihood(xs), self.get_lnprior(xs)
+            # get initial log-likelihood and log-prior
+            lnlike0, lnprior0 = self.get_lnlikelihood(xs), self.get_lnprior(xs)
 
-        if iters is not None:
-            
-            short_chain = np.zeros((iters,len(hind)))
-            for ii in range(iters):
+            if iters is not None:
+                
+                short_chain = np.zeros((iters,len(hind)))
+                for ii in range(iters):
 
-                # standard gaussian jump (this allows for different step sizes)
-                q = xnew.copy()
-                sigmas = 0.05 * len(hind)
-                probs = [0.1, 0.15, 0.5, 0.15, 0.1]
-                sizes = [0.1, 0.5, 1.0, 3.0, 10.0]
-                scale = np.random.choice(sizes, p=probs)
-                par = np.random.choice(hind, size=1) # only one hyper param at a time
-                q[par] += np.random.randn(len(q[par])) * sigmas * scale
+                    # standard gaussian jump (this allows for different step sizes)
+                    q = xnew.copy()
+                    sigmas = 0.05 * len(hind)
+                    probs = [0.1, 0.15, 0.5, 0.15, 0.1]
+                    sizes = [0.1, 0.5, 1.0, 3.0, 10.0]
+                    scale = np.random.choice(sizes, p=probs)
+                    par = np.random.choice(hind, size=1) # only one hyper param at a time
+                    q[par] += np.random.randn(len(q[par])) * sigmas * scale
 
-                # get log-like and log prior at new position
-                lnlike1, lnprior1 = self.get_lnlikelihood(q), self.get_lnprior(q)
+                    # get log-like and log prior at new position
+                    lnlike1, lnprior1 = self.get_lnlikelihood(q), self.get_lnprior(q)
 
-                # metropolis step
-                diff = (lnlike1 + lnprior1) - (lnlike0 + lnprior0)
-                if diff > np.log(np.random.rand()):
-                    xnew = q
-                    lnlike0 = lnlike1
-                    lnprior0 = lnprior1
-                else:
-                    xnew = xnew
+                    # metropolis step
+                    diff = (lnlike1 + lnprior1) - (lnlike0 + lnprior0)
+                    if diff > np.log(np.random.rand()):
+                        xnew = q
+                        lnlike0 = lnlike1
+                        lnprior0 = lnprior1
+                    else:
+                        xnew = xnew
 
-                short_chain[ii,:] = q[hind]
+                    short_chain[ii,:] = q[hind]
 
-            self.cov_hyper = np.cov(short_chain[100:,:],rowvar=False)
-            self.sigma_hyper = np.diag(self.cov_hyper)**0.5
-            self.svd_hyper = np.linalg.svd(self.cov_hyper)
-            self.aclength_hyper = int(np.max([int(acor.acor(short_chain[100:,jj])[0]) 
-                                                  for jj in range(len(hind))]))
+                self.cov_hyper = np.cov(short_chain[100:,:],rowvar=False)
+                self.sigma_hyper = np.diag(self.cov_hyper)**0.5
+                self.svd_hyper = np.linalg.svd(self.cov_hyper)
+                self.aclength_hyper = int(np.max([int(acor.acor(short_chain[100:,jj])[0]) 
+                                                    for jj in range(len(hind))]))
 
-        elif iters is None:
-            
-            for ii in range(self.aclength_hyper):
+            elif iters is None:
+                
+                for ii in range(self.aclength_hyper):
 
-                # standard gaussian jump (this allows for different step sizes)
-                q = xnew.copy()
-                sigmas = 0.05 * len(hind)
-                probs = [0.1, 0.15, 0.5, 0.15, 0.1]
-                sizes = [0.1, 0.5, 1.0, 3.0, 10.0]
-                scale = np.random.choice(sizes, p=probs)
-                par = np.random.choice(hind, size=1) # only one hyper param at a time
-                q[par] += np.random.randn(len(q[par])) * sigmas * scale
+                    # standard gaussian jump (this allows for different step sizes)
+                    q = xnew.copy()
+                    sigmas = 0.05 * len(hind)
+                    probs = [0.1, 0.15, 0.5, 0.15, 0.1]
+                    sizes = [0.1, 0.5, 1.0, 3.0, 10.0]
+                    scale = np.random.choice(sizes, p=probs)
+                    par = np.random.choice(hind, size=1) # only one hyper param at a time
+                    q[par] += np.random.randn(len(q[par])) * sigmas * scale
 
-                # get log-like and log prior at new position
-                lnlike1, lnprior1 = self.get_lnlikelihood(q), self.get_lnprior(q)
+                    # get log-like and log prior at new position
+                    lnlike1, lnprior1 = self.get_lnlikelihood(q), self.get_lnprior(q)
 
-                # metropolis step
-                diff = (lnlike1 + lnprior1) - (lnlike0 + lnprior0)
-                if diff > np.log(np.random.rand()):
-                    xnew = q
-                    lnlike0 = lnlike1
-                    lnprior0 = lnprior1
-                else:
-                    xnew = xnew
+                    # metropolis step
+                    diff = (lnlike1 + lnprior1) - (lnlike0 + lnprior0)
+                    if diff > np.log(np.random.rand()):
+                        xnew = q
+                        lnlike0 = lnlike1
+                        lnprior0 = lnprior1
+                    else:
+                        xnew = xnew
         
         return xnew
 
@@ -390,7 +419,7 @@ class PTABlockGibbs2(object):
         return xnew
     
     
-    def update_ecorr_params(self, xs, iters=20):
+    def update_ecorr_params(self, xs, iters=None):
 
         # get white noise parameter indices
         eind = self.get_ecorr_indices()
@@ -485,36 +514,36 @@ class PTABlockGibbs2(object):
         # map parameter vector
         params = self.map_params(xs)
 
-        # start likelihood calculations
-        loglike = 0
-
         # get auxiliaries
-        Nvec = self.pta.get_ndiag(params)[0]
-        phiinv = self.pta.get_phiinv(params, logdet=False)[0]
+        Nvec = self.pta.get_ndiag(params)
+        phiinv = self.pta.get_phiinv(params, logdet=False)
         residuals = self._residuals
 
-        T = self.pta.get_basis(params)[0]
-        if self.TNT is None and self.d is None:
-            self.TNT = np.dot(T.T, T / Nvec[:,None])
-            self.d = np.dot(T.T, residuals/Nvec)
+        T = self.pta.get_basis(params)
+        if not self.TNT and not self.d:
+            for ii in range(len(self.pta.pulsars)):
+                self.TNT.append(np.dot(T[ii].T, T[ii] / Nvec[ii][:,None]))
+                self.d.append(np.dot(T[ii].T, residuals[ii]/Nvec[ii]))
         #d = self.pta.get_TNr(params)[0]
         #TNT = self.pta.get_TNT(params)[0]
 
         # Red noise piece
-        Sigma = self.TNT + np.diag(phiinv)
+        b = []
+        for ii in range(len(self.pta.pulsars)):
+            Sigma = self.TNT[ii] + np.diag(phiinv[ii])
 
-        try:
-            u, s, _ = sl.svd(Sigma)
-            mn = np.dot(u, np.dot(u.T, self.d)/s)
-            Li = u * np.sqrt(1/s)
-        except np.linalg.LinAlgError:
-            Q, R = sl.qr(Sigma)
-            Sigi = sl.solve(R, Q.T)
-            mn = np.dot(Sigi, self.d)
-            u, s, _ = sl.svd(Sigi)
-            Li = u * np.sqrt(1/s)
+            try:
+                u, s, _ = sl.svd(Sigma)
+                mn = np.dot(u, np.dot(u.T, self.d[ii])/s)
+                Li = u * np.sqrt(1/s)
+            except np.linalg.LinAlgError:
+                Q, R = sl.qr(Sigma)
+                Sigi = sl.solve(R, Q.T)
+                mn = np.dot(Sigi, self.d[ii])
+                u, s, _ = sl.svd(Sigi)
+                Li = u * np.sqrt(1/s)
 
-        b = mn + np.dot(Li, np.random.randn(Li.shape[0]))
+            b.append(mn + np.dot(Li, np.random.randn(Li.shape[0])))
 
         return b
 
@@ -549,42 +578,45 @@ class PTABlockGibbs2(object):
 
         # map parameter vector
         params = self.map_params(xs)
-        
-        # start likelihood calculations
-        loglike = 0
 
         # get auxiliaries
-        Nvec = self.pta.get_ndiag(params)[0]
-        phiinv, logdet_phi = self.pta.get_phiinv(params, 
-                                                 logdet=True)[0]
+        Nvec = self.pta.get_ndiag(params)
+        phiinv = self.pta.get_phiinv(params, 
+                                     logdet=True)
         residuals = self._residuals
 
-        T = self.pta.get_basis(params)[0]
-        if self.TNT is None and self.d is None:
-            self.TNT = np.dot(T.T, T / Nvec[:,None])
-            self.d = np.dot(T.T, residuals/Nvec)
+        T = self.pta.get_basis(params)
+        if not self.TNT and not self.d:
+            for ii in range(len(self.pta.pulsars)):
+                self.TNT.append(np.dot(T[ii].T, T[ii] / Nvec[ii][:,None]))
+                self.d.append(np.dot(T[ii].T, residuals[ii]/Nvec[ii]))
 
-        # log determinant of N
-        logdet_N = np.sum(np.log(Nvec))
+        # start likelihood calculations
+        loglike = 0
+        for ii in range(len(self.pta.pulsars)):
 
-        # triple product in likelihood function
-        rNr = np.sum(residuals**2/Nvec)
+            # log determinant of N
+            logdet_N = np.sum(np.log(Nvec[ii]))
 
-        # first component of likelihood function
-        loglike += -0.5 * (logdet_N + rNr)
+            # triple product in likelihood function
+            rNr = np.sum(residuals[ii]**2/Nvec[ii])
 
-        # Red noise piece
-        Sigma = self.TNT + np.diag(phiinv)
+            # first component of likelihood function
+            loglike += -0.5 * (logdet_N + rNr)
 
-        try:
-            cf = sl.cho_factor(Sigma)
-            expval = sl.cho_solve(cf, self.d)
-        except np.linalg.LinAlgError:
-            return -np.inf
+            # Red noise piece
+            Sigma = self.TNT[ii] + np.diag(phiinv[ii][0])
 
-        logdet_sigma = np.sum(2 * np.log(np.diag(cf[0])))
-        loglike += 0.5 * (np.dot(self.d, expval) - 
-                          logdet_sigma - logdet_phi)
+            try:
+                #print(ii,Sigma)
+                cf = sl.cho_factor(Sigma)
+                expval = sl.cho_solve(cf, self.d[ii])
+            except np.linalg.LinAlgError:
+                return -np.inf
+
+            logdet_sigma = np.sum(2 * np.log(np.diag(cf[0])))
+            loglike += 0.5 * (np.dot(self.d[ii], expval) - 
+                            logdet_sigma - phiinv[ii][1])
 
         return loglike
 
@@ -602,7 +634,7 @@ class PTABlockGibbs2(object):
         os.system(f'mkdir -p {outdir}')
         
         self.chain = np.zeros((niter, len(xs)))
-        self.bchain = np.zeros((niter, len(self._b)))
+        #self.bchain = np.zeros((niter, len(self._b)))
         
         self.iter = 0
         startLength = 0
@@ -612,7 +644,7 @@ class PTABlockGibbs2(object):
             # read in previous chains
             tmp_chains = []
             tmp_chains.append(np.loadtxt(f'{outdir}/chain.txt'))
-            tmp_chains.append(np.loadtxt(f'{outdir}/bchain.txt'))
+            #tmp_chains.append(np.loadtxt(f'{outdir}/bchain.txt'))
             
             # find minimum length
             minLength = np.min([tmp.shape[0] for tmp in tmp_chains])
@@ -622,7 +654,7 @@ class PTABlockGibbs2(object):
             
             # pad with zeros if shorter than niter
             self.chain[:tmp_chains[0].shape[0]] = tmp_chains[0]
-            self.bchain[:tmp_chains[1].shape[0]] = tmp_chains[1]
+            #self.bchain[:tmp_chains[1].shape[0]] = tmp_chains[1]
             
             # set new starting point for sampling
             startLength = minLength
@@ -632,13 +664,13 @@ class PTABlockGibbs2(object):
         for ii in range(startLength, niter):
             self.iter = ii
             self.chain[ii, :] = xnew
-            self.bchain[ii,:] = self._b
+            #self.bchain[ii,:] = self._b
             
             if ii==0:
                 self._b = self.update_b(xs)
 
-            self.TNT = None
-            self.d = None
+            self.TNT = []
+            self.d = []
 
             # update efac/equad parameters
             if self.get_efacequad_indices().size != 0:
@@ -656,11 +688,13 @@ class PTABlockGibbs2(object):
 
             # update red noise parameters
             if self.get_hyper_param_indices().size != 0:
-                #xnew = self.update_hyper_params(xnew, iters=None)
-                if ii==0:
-                    xnew = self.update_hyper_params(xnew, iters=1000)
+                if self.redsample == 'conditional':
+                    xnew = self.update_hyper_params(xnew)
                 else:
-                    xnew = self.update_hyper_params(xnew, iters=None)
+                    if ii==0:
+                        xnew = self.update_hyper_params(xnew, iters=100)
+                    else:
+                        xnew = self.update_hyper_params(xnew, iters=None)
 
             # update hyper-parameters
             xnew = self.update_rho_params(xnew)
@@ -676,4 +710,4 @@ class PTABlockGibbs2(object):
                                                                        time.time()-tstart))
                 sys.stdout.flush()
                 np.savetxt(f'{outdir}/chain.txt', self.chain[:ii+1, :])
-                np.savetxt(f'{outdir}/bchain.txt', self.bchain[:ii+1, :])
+                #np.savetxt(f'{outdir}/bchain.txt', self.bchain[:ii+1, :])
