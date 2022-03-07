@@ -11,7 +11,7 @@ import enterprise
 from enterprise.signals import selections
 
 
-class PTABlockGibbs2(object):
+class PulsarBlockGibbs(object):
     
     """Gibbs-based pulsar-timing periodogram analysis.
     
