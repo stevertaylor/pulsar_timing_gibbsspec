@@ -1,14 +1,14 @@
 from __future__ import division
 
-import os, time, sys
+import os, time, sys, shutil
 
 import numpy as np
-import scipy
 import scipy.linalg as sl
 import acor
+from tqdm import tqdm
 
-import enterprise
 from enterprise.signals import selections
+from PTMCMCSampler.PTMCMCSampler import PTSampler as ptmcmc
 
 
 class PulsarBlockGibbs(object):
@@ -274,66 +274,40 @@ class PulsarBlockGibbs(object):
         xnew = xs.copy()
         
         # get initial log-likelihood and log-prior
-        lnlike0, lnprior0 = self.get_lnlikelihood(xs), self.get_lnprior(xs)
+        lnlike0, lnprob0 = self.get_lnlikelihood(xs), self.get_lnlikelihood(xs)+self.get_lnprior(xs)
 
         if iters is not None:
-            
-            short_chain = np.zeros((iters,len(rind)))
-            for ii in range(iters):
 
-                # standard gaussian jump (this allows for different step sizes)
-                q = xnew.copy()
-                sigmas = 0.05 * len(rind)
-                probs = [0.1, 0.15, 0.5, 0.15, 0.1]
-                sizes = [0.1, 0.5, 1.0, 3.0, 10.0]
-                scale = np.random.choice(sizes, p=probs)
-                par = np.random.choice(rind, size=1) # only one hyper param at a time
-                q[par] += np.random.randn(len(q[par])) * sigmas * scale
-
-                # get log-like and log prior at new position
-                lnlike1, lnprior1 = self.get_lnlikelihood(q), self.get_lnprior(q)
-
-                # metropolis step
-                diff = (lnlike1 + lnprior1) - (lnlike0 + lnprior0)
-                if diff > np.log(np.random.rand()):
-                    xnew = q
-                    lnlike0 = lnlike1
-                    lnprior0 = lnprior1
-                else:
-                    xnew = xnew
-
-                short_chain[ii,:] = q[rind]
-
-            self.cov_red = np.cov(short_chain[100:,:],rowvar=False)
-            self.sigma_red = np.diag(self.cov_red)**0.5
-            self.svd_red = np.linalg.svd(self.cov_red)
-            self.aclength_red = int(np.max([int(acor.acor(short_chain[100:,jj])[0]) 
-                                            for jj in range(len(rind))]))
+            # setup ptmcmc sampler
+            outDir = './dummy/'
+            self.sampler = ptmcmc(ndim=len(xnew), logl=self.get_lnlikelihood,logp=self.get_lnprior,
+                                  cov=0.01*np.diag(np.ones_like(xnew)), groups=None, 
+                                  verbose=False, resume=False, outDir=outDir)
+            # sample everything to estimate cov matrix and de buffer
+            self.sampler.sample(xnew, iters, SCAMweight=30,
+                                AMweight=15, DEweight=50, burn=iters-1)
+            xnew, _, _ = self.sampler.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
+            # select only red noise as sampling group from now on
+            self.sampler.groups = [rind]
+            # grab only red noise portions of cov matrix
+            self.sampler.cov = self.sampler.cov[rind,:][:,rind]
+            self.sampler.U = [[]] * len(self.sampler.groups)
+            self.sampler.S = [[]] * len(self.sampler.groups)
+            # update parameter group svd for jumps
+            for ct, group in enumerate(self.sampler.groups):
+                covgroup = np.zeros((len(group), len(group)))
+                for ii in range(len(group)):
+                    for jj in range(len(group)):
+                        covgroup[ii, jj] = self.sampler.cov[group[ii], group[jj]]
+                self.sampler.U[ct], self.sampler.S[ct], _ = np.linalg.svd(covgroup)
+            # delete the dummy directory that ptmcmcsampler makes
+            shutil.rmtree(outDir)
 
         elif iters is None:
-            
-            for ii in range(self.aclength_red):
 
-                # standard gaussian jump (this allows for different step sizes)
-                q = xnew.copy()
-                sigmas = 0.05 * len(rind)
-                probs = [0.1, 0.15, 0.5, 0.15, 0.1]
-                sizes = [0.1, 0.5, 1.0, 3.0, 10.0]
-                scale = np.random.choice(sizes, p=probs)
-                par = np.random.choice(rind, size=1) # only one hyper param at a time
-                q[par] += np.random.randn(len(q[par])) * sigmas * scale
-
-                # get log-like and log prior at new position
-                lnlike1, lnprior1 = self.get_lnlikelihood(q), self.get_lnprior(q)
-
-                # metropolis step
-                diff = (lnlike1 + lnprior1) - (lnlike0 + lnprior0)
-                if diff > np.log(np.random.rand()):
-                    xnew = q
-                    lnlike0 = lnlike1
-                    lnprior0 = lnprior1
-                else:
-                    xnew = xnew
+            # run the ptmcmc sampler for 20 steps
+            for ii in range(20):
+                xnew, lnlike0, lnprob0 = self.sampler.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
         
         return xnew
 
@@ -653,8 +627,8 @@ class PulsarBlockGibbs(object):
             startLength = minLength
             xnew = self.chain[startLength-1]
             
-        tstart = time.time()
-        for ii in range(startLength, niter):
+        #tstart = time.time()
+        for ii in tqdm(range(startLength, niter)):
             self.iter = ii
             self.chain[ii, :] = xnew
             self.bchain[ii,:] = self._b
@@ -684,9 +658,8 @@ class PulsarBlockGibbs(object):
 
             # update red noise parameters
             if self.get_red_param_indices().size != 0:
-                #xnew = self.update_hyper_params(xnew, iters=None)
                 if ii==0:
-                    xnew = self.update_red_params(xnew, iters=1000)
+                    xnew = self.update_red_params(xnew, iters=10000)
                 else:
                     xnew = self.update_red_params(xnew, iters=None)
 
@@ -700,9 +673,9 @@ class PulsarBlockGibbs(object):
 
 
             if ii % 100 == 0 and ii > 0:
-                sys.stdout.write('\r')
-                sys.stdout.write('Finished %g percent in %g seconds.'%(ii / niter * 100, 
-                                                                       time.time()-tstart))
-                sys.stdout.flush()
+                #sys.stdout.write('\r')
+                #sys.stdout.write('Finished %g percent in %g seconds.'%(ii / niter * 100, 
+                #                                                       time.time()-tstart))
+                #sys.stdout.flush()
                 np.savetxt(f'{outdir}/chain.txt', self.chain[:ii+1, :])
                 np.savetxt(f'{outdir}/bchain.txt', self.bchain[:ii+1, :])
