@@ -276,30 +276,31 @@ class PulsarBlockGibbs(object):
         # get initial log-likelihood and log-prior
         lnlike0, lnprob0 = self.get_lnlikelihood(xs), self.get_lnlikelihood(xs)+self.get_lnprior(xs)
 
+        # this block should run at the start of sampoling to estimate the posterior covariance matrix
         if iters is not None:
 
             # setup ptmcmc sampler
             outDir = './dummy/'
-            self.sampler = ptmcmc(ndim=len(xnew), logl=self.get_lnlikelihood,logp=self.get_lnprior,
-                                  cov=0.01*np.diag(np.ones_like(xnew)), groups=None, 
-                                  verbose=False, resume=False, outDir=outDir)
+            self.ptsampler_rn = ptmcmc(ndim=len(xnew), logl=self.get_lnlikelihood, logp=self.get_lnprior,
+                                       cov=0.01*np.diag(np.ones_like(xnew)), groups=None, 
+                                       verbose=False, resume=False, outDir=outDir)
             # sample everything to estimate cov matrix and de buffer
-            self.sampler.sample(xnew, iters, SCAMweight=30,
+            self.ptsampler_rn.sample(xnew, iters, SCAMweight=30,
                                 AMweight=15, DEweight=50, burn=iters-1)
-            xnew, _, _ = self.sampler.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
+            xnew, _, _ = self.ptsampler_rn.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
             # select only red noise as sampling group from now on
-            self.sampler.groups = [rind]
+            self.ptsampler_rn.groups = [rind]
             # grab only red noise portions of cov matrix
-            self.sampler.cov = self.sampler.cov[rind,:][:,rind]
-            self.sampler.U = [[]] * len(self.sampler.groups)
-            self.sampler.S = [[]] * len(self.sampler.groups)
+            self.ptsampler_rn.cov = self.ptsampler_rn.cov[rind,:][:,rind]
+            self.ptsampler_rn.U = [[]] * len(self.ptsampler_rn.groups)
+            self.ptsampler_rn.S = [[]] * len(self.ptsampler_rn.groups)
             # update parameter group svd for jumps
-            for ct, group in enumerate(self.sampler.groups):
+            for ct, group in enumerate(self.ptsampler_rn.groups):
                 covgroup = np.zeros((len(group), len(group)))
                 for ii in range(len(group)):
                     for jj in range(len(group)):
-                        covgroup[ii, jj] = self.sampler.cov[group[ii], group[jj]]
-                self.sampler.U[ct], self.sampler.S[ct], _ = np.linalg.svd(covgroup)
+                        covgroup[ii, jj] = self.ptsampler_rn.cov[group[ii], group[jj]]
+                self.ptsampler_rn.U[ct], self.ptsampler_rn.S[ct], _ = np.linalg.svd(covgroup)
             # delete the dummy directory that ptmcmcsampler makes
             shutil.rmtree(outDir)
 
@@ -307,7 +308,7 @@ class PulsarBlockGibbs(object):
 
             # run the ptmcmc sampler for 20 steps
             for ii in range(20):
-                xnew, lnlike0, lnprob0 = self.sampler.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
+                xnew, lnlike0, lnprob0 = self.ptsampler_rn.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
         
         return xnew
 
