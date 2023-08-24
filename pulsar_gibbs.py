@@ -57,6 +57,7 @@ class PulsarBlockGibbs(object):
         """
 
         self.pta = pta
+        self.pulsar_name = pta.pulsars[0]
         self.hypersample = hypersample
         self.ecorrsample = ecorrsample
         if np.any(['basis_ecorr' in key for 
@@ -280,13 +281,13 @@ class PulsarBlockGibbs(object):
         if iters is not None:
 
             # setup ptmcmc sampler
-            outDir = './dummy/'
+            outDir = f'./dummy_{self.pulsar_name}/'
             self.ptsampler_rn = ptmcmc(ndim=len(xnew), logl=self.get_lnlikelihood, logp=self.get_lnprior,
                                        cov=0.01*np.diag(np.ones_like(xnew)), groups=None, 
                                        verbose=False, resume=False, outDir=outDir)
             # sample everything to estimate cov matrix and de buffer
             self.ptsampler_rn.sample(xnew, iters, SCAMweight=30,
-                                AMweight=15, DEweight=50, burn=iters-1)
+                                     AMweight=15, DEweight=50, burn=iters-1)
             xnew, _, _ = self.ptsampler_rn.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
             # select only red noise as sampling group from now on
             self.ptsampler_rn.groups = [rind]
