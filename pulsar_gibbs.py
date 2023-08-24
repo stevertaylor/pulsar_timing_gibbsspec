@@ -288,10 +288,12 @@ class PulsarBlockGibbs(object):
             self.ptsampler_rn.sample(xnew, iters, SCAMweight=30,
                                 AMweight=15, DEweight=50, burn=iters-1)
             xnew, _, _ = self.ptsampler_rn.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
+            
             # select only red noise as sampling group from now on
             self.ptsampler_rn.groups = [rind]
             # grab only red noise portions of cov matrix
             self.ptsampler_rn.cov = self.ptsampler_rn.cov[rind,:][:,rind]
+            
             self.ptsampler_rn.U = [[]] * len(self.ptsampler_rn.groups)
             self.ptsampler_rn.S = [[]] * len(self.ptsampler_rn.groups)
             # update parameter group svd for jumps
@@ -301,13 +303,14 @@ class PulsarBlockGibbs(object):
                     for jj in range(len(group)):
                         covgroup[ii, jj] = self.ptsampler_rn.cov[group[ii], group[jj]]
                 self.ptsampler_rn.U[ct], self.ptsampler_rn.S[ct], _ = np.linalg.svd(covgroup)
+            
             # delete the dummy directory that ptmcmcsampler makes
             shutil.rmtree(outDir)
 
         elif iters is None:
 
             # run the ptmcmc sampler for 20 steps
-            for ii in range(20):
+            for _ in range(20):
                 xnew, lnlike0, lnprob0 = self.ptsampler_rn.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
         
         return xnew
@@ -649,9 +652,6 @@ class PulsarBlockGibbs(object):
             
             # update ecorr parameters
             if self.get_ecorr_indices().size != 0:
-                #if self.ecorrsample == 'conditional':
-                #    xnew = self.update_ecorr_params(xnew, iters=None)
-                #else:
                 if ii==0:
                     xnew = self.update_ecorr_params(xnew, iters=1000)
                 else:
@@ -668,7 +668,7 @@ class PulsarBlockGibbs(object):
             if self.get_gwrho_param_indices().size != 0:
                 xnew = self.update_gwrho_params(xnew)
 
-            # if accepted update quadratic params
+            # if accepted, update quadratic params
             if np.all(xnew != self.chain[ii,-1]):
                 self._b = self.update_b(xnew)
 
