@@ -125,11 +125,14 @@ class PulsarBlockGibbs(object):
                     inds_sel_tmp = self.Umat[self.sel[key],:]
                     self.ecorr_inds_sel.append(np.where(np.sum(inds_sel_tmp,axis=0)>0.)[0])
 
-        # identify intrinsic red noise signals
+        # identify intrinsic red noise and gw signals
         self.red_sig = None
+        self.gw_sig = None
         for sig in self.pta.signals:
             if 'red' in self.pta.signals[sig].name:
                 self.red_sig = self.pta.signals[sig]
+            if 'gw' in self.pta.signals[sig].name:
+                self.gw_sig = self.pta.signals[sig]
 
                        
     @property
@@ -215,7 +218,6 @@ class PulsarBlockGibbs(object):
             else:
                 # draw variance values from numerical CDF,
                 # based on van Haasteren & Vallisneri (2014)
-
                 tau = self._b[self.gwid]**2
                 tau = tau[::2] + tau[1::2]
 
@@ -225,19 +227,25 @@ class PulsarBlockGibbs(object):
                     irn = np.zeros(tau.shape[0])
                 
                 rho_tmp = 10**np.linspace(np.log10(self.rhomin), np.log10(self.rhomax), 1000)
-                ratio = tau[:,None] / np.add.outer(irn, rho_tmp) # np.outer(tau, 1/rho_tmp)
-                pdf = ratio * np.exp(-ratio/2) * np.log(10)
-                cdf = np.cumsum(pdf,axis=1)
-                cdf /= cdf.max(axis=1)[:,None]
+                #ratio = tau[:,None] / np.add.outer(irn, rho_tmp) # np.outer(tau, 1/rho_tmp)
+                #pdf = ratio * np.exp(-ratio/2) * np.log(10)
+                #cdf = np.cumsum(pdf,axis=1)
+                #cdf /= cdf.max(axis=1)[:,None]
 
-                u = np.random.uniform(size=cdf.shape[0])
-                idx = np.array([np.searchsorted(cdf[ii,:], u[ii], side='left') 
-                                for ii in range(u.shape[0])]) - 1
-                rhonew = np.take_along_axis(rho_tmp, idx, axis=0)
+                #u = np.random.uniform(size=cdf.shape[0])
+                #idx = np.array([np.searchsorted(cdf[ii,:], u[ii], side='left') 
+                #                for ii in range(u.shape[0])]) - 1
+                #rhonew = np.take_along_axis(rho_tmp, idx, axis=0)
+                logratio = np.log(tau[:,None]) - np.logaddexp.outer(np.log(irn), np.log(rho_tmp))
+                logpdf = logratio - np.exp(logratio)/2 + np.log(10)
+                gumbels = np.random.gumbel(size=(tau.shape[0],rho_tmp.shape[0]))
+                rhonew = rho_tmp[np.argmax(logpdf + gumbels, axis=1)]
                 
                 xnew[gwind] = 0.5*np.log10(rhonew)
           
         else:
+            print('ERROR: Only conditional draws on rho for now...')
+            '''
             # get initial log-likelihood and log-prior
             lnlike0, lnprior0 = self.get_lnlikelihood(xs), self.get_lnprior(xs)
             
@@ -263,6 +271,7 @@ class PulsarBlockGibbs(object):
                     lnprior0 = lnprior1
                 else:
                     xnew = xnew
+            '''
         
         return xnew
 
@@ -275,14 +284,14 @@ class PulsarBlockGibbs(object):
         xnew = xs.copy()
         
         # get initial log-likelihood and log-prior
-        lnlike0, lnprob0 = self.get_lnlikelihood(xs), self.get_lnlikelihood(xs)+self.get_lnprior(xs)
+        lnlike0, lnprob0 = self.get_lnlikelihood_red(xs), self.get_lnlikelihood_red(xs)+self.get_lnprior(xs)
 
         # this block should run at the start of sampoling to estimate the posterior covariance matrix
         if iters is not None:
 
             # setup ptmcmc sampler
             outDir = f'./dummy_{self.pulsar_name}/'
-            self.ptsampler_rn = ptmcmc(ndim=len(xnew), logl=self.get_lnlikelihood, logp=self.get_lnprior,
+            self.ptsampler_rn = ptmcmc(ndim=len(xnew), logl=self.get_lnlikelihood_red, logp=self.get_lnprior,
                                        cov=0.01*np.diag(np.ones_like(xnew)), groups=None, 
                                        verbose=False, resume=False, outDir=outDir)
             # sample everything to estimate cov matrix and de buffer
@@ -396,23 +405,13 @@ class PulsarBlockGibbs(object):
     
     def update_ecorr_params(self, xs, iters=None):
 
+        # NEEDS TO BE FIXED...
+
         # get ecorr parameter indices
         eind = self.get_ecorr_indices()
 
         xnew = xs.copy()
         
-        #if self.ecorrsample == 'conditional':
-        #    print('ERROR: Not working yet...')
-        #    for ii,inds_sel in enumerate(self.ecorr_inds_sel):
-        #        jvals = self._b[self.ecid[0]+inds_sel]
-        #        tau = np.sum(jvals)**2 / len(jvals)
-        #        #tau = np.mean(jvals**2)
-        #        eta = np.random.uniform(0, 1-np.exp((tau/self.ecorrmax) - (tau/self.ecorrmin)))
-        #        jnew = tau / ((tau/self.ecorrmax) - np.log(1-eta))
-        #        xnew[eind[ii]] = 0.5*np.log10(jnew)
-        #        print(ii,inds_sel,tau,eta,jnew,xnew)
-                
-        #else:
         lnlike0, lnprior0 = self.get_lnlikelihood(xnew), self.get_lnprior(xnew)
         
         if iters is not None:
@@ -498,8 +497,6 @@ class PulsarBlockGibbs(object):
         if self.TNT is None and self.d is None:
             self.TNT = np.dot(T.T, T / Nvec[:,None])
             self.d = np.dot(T.T, residuals/Nvec)
-        #d = self.pta.get_TNr(params)[0]
-        #TNT = self.pta.get_TNT(params)[0]
 
         # Red noise piece
         Sigma = self.TNT + np.diag(phiinv)
@@ -546,7 +543,25 @@ class PulsarBlockGibbs(object):
         return loglike
 
 
-    def get_lnlikelihood(self, xs):
+    def get_lnlikelihood_red(self, xs):
+
+        # map parameters
+        params = self.map_params(xs)
+
+        # adding together squares of GP coefficients
+        tau = self._b[self.gwid]**2
+        tau = tau[::2] + tau[1::2]
+
+        irn = np.array(self.red_sig.get_phi(params))[::2]
+        gwsig = np.array(self.gw_sig.get_phi(params))[::2]
+        
+        ratio = np.log(tau) - np.logaddexp(np.log(irn), np.log(gwsig))
+        loglike = np.sum(ratio - np.exp(ratio)/2)
+
+        return loglike
+
+
+    def get_lnlikelihood_fullmarg(self, xs):
 
         # map parameter vector
         params = self.map_params(xs)
@@ -651,12 +666,16 @@ class PulsarBlockGibbs(object):
                 else:
                     xnew = self.update_white_params(xnew, iters=None)
             
+
             # update ecorr parameters
             if self.get_ecorr_indices().size != 0:
+                print('ERROR: No ECORR for now...')
+                '''
                 if ii==0:
                     xnew = self.update_ecorr_params(xnew, iters=1000)
                 else:
                     xnew = self.update_ecorr_params(xnew, iters=None)
+                '''
 
             # update red noise parameters
             if self.get_red_param_indices().size != 0:
