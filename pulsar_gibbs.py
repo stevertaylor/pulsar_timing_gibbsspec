@@ -201,47 +201,38 @@ class PulsarBlockGibbs(object):
         gwind = self.get_gwrho_param_indices()
 
         xnew = xs.copy()
+        
         if self.hypersample == 'conditional':
+
+            tau = self._b[self.gwid]**2
+            tau = (tau[::2] + tau[1::2]) / 2
 
             if self.red_sig is None:
                 # draw variance values analytically,
                 # a la van Haasteren & Vallisneri (2014)
 
-                tau = self._b[self.gwid]**2
-                tau = (tau[::2] + tau[1::2]) / 2
-                
                 eta = np.random.uniform(0, 1-np.exp((tau/self.rhomax) - (tau/self.rhomin)))
                 rhonew = tau / ((tau/self.rhomax) - np.log(1-eta))
-                
-                xnew[gwind] = 0.5*np.log10(rhonew)
 
             else:
                 # draw variance values from numerical CDF,
                 # based on van Haasteren & Vallisneri (2014)
-                tau = self._b[self.gwid]**2
-                tau = tau[::2] + tau[1::2]
 
                 if self.red_sig is not None:
                     irn = np.array(self.red_sig.get_phi(self.map_params(xnew)))[::2]
                 else:
                     irn = np.zeros(tau.shape[0])
                 
+                # grid is uniform in log10(rho); implicit log-uniform prior
                 rho_tmp = 10**np.linspace(np.log10(self.rhomin), np.log10(self.rhomax), 1000)
-                #ratio = tau[:,None] / np.add.outer(irn, rho_tmp) # np.outer(tau, 1/rho_tmp)
-                #pdf = ratio * np.exp(-ratio/2) * np.log(10)
-                #cdf = np.cumsum(pdf,axis=1)
-                #cdf /= cdf.max(axis=1)[:,None]
-
-                #u = np.random.uniform(size=cdf.shape[0])
-                #idx = np.array([np.searchsorted(cdf[ii,:], u[ii], side='left') 
-                #                for ii in range(u.shape[0])]) - 1
-                #rhonew = np.take_along_axis(rho_tmp, idx, axis=0)
                 logratio = np.log(tau[:,None]) - np.logaddexp.outer(np.log(irn), np.log(rho_tmp))
-                logpdf = logratio - np.exp(logratio)/2 + np.log(10)
+                logpdf = logratio - np.exp(logratio) + np.log(10) # correct for log10 to log
+                # use Gumbel Max Trick 
+                # https://homes.cs.washington.edu/~ewein//blog/2022/03/04/gumbel-max/
                 gumbels = np.random.gumbel(size=(tau.shape[0],rho_tmp.shape[0]))
                 rhonew = rho_tmp[np.argmax(logpdf + gumbels, axis=1)]
-                
-                xnew[gwind] = 0.5*np.log10(rhonew)
+
+            xnew[gwind] = 0.5*np.log10(rhonew)
           
         else:
             print('ERROR: Only conditional draws on rho for now...')
@@ -282,16 +273,19 @@ class PulsarBlockGibbs(object):
         rind = self.get_red_param_indices()
 
         xnew = xs.copy()
-        
-        # get initial log-likelihood and log-prior
-        lnlike0, lnprob0 = self.get_lnlikelihood_red(xs), self.get_lnlikelihood_red(xs)+self.get_lnprior(xs)
 
-        # this block should run at the start of sampoling to estimate the posterior covariance matrix
+        # this block should run at the start of sampling to estimate the posterior covariance matrix
         if iters is not None:
+
+            # get initial log-likelihood and log-prior
+            # use the full marginalized PTA likelihood to sample everything
+            lnlike0 = self.get_lnlikelihood_fullmarg(xnew)
+            lnprob0 = self.get_lnlikelihood_fullmarg(xnew) + self.get_lnprior(xnew)
 
             # setup ptmcmc sampler
             outDir = f'./dummy_{self.pulsar_name}/'
-            self.ptsampler_rn = ptmcmc(ndim=len(xnew), logl=self.get_lnlikelihood_red, logp=self.get_lnprior,
+            self.ptsampler_rn = ptmcmc(ndim=len(xnew), 
+                                       logl=self.get_lnlikelihood_red, logp=self.get_lnprior,
                                        cov=0.01*np.diag(np.ones_like(xnew)), groups=None, 
                                        verbose=False, resume=False, outDir=outDir)
             # sample everything to estimate cov matrix and de buffer
@@ -318,6 +312,11 @@ class PulsarBlockGibbs(object):
             shutil.rmtree(outDir)
 
         elif iters is None:
+
+            # get initial log-likelihood and log-prior
+            # use the red-noise portion of the unmarginalized likelihood
+            lnlike0 = self.get_lnlikelihood_red(xnew)
+            lnprob0 = self.get_lnlikelihood_red(xnew) + self.get_lnprior(xnew)
 
             # run the ptmcmc sampler for 20 steps
             for _ in range(20):
