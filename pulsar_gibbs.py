@@ -201,7 +201,7 @@ class PulsarBlockGibbs(object):
         gwind = self.get_gwrho_param_indices()
 
         xnew = xs.copy()
-        
+
         if self.hypersample == 'conditional':
 
             tau = self._b[self.gwid]**2
@@ -226,7 +226,7 @@ class PulsarBlockGibbs(object):
                 # grid is uniform in log10(rho); implicit log-uniform prior
                 rho_tmp = 10**np.linspace(np.log10(self.rhomin), np.log10(self.rhomax), 1000)
                 logratio = np.log(tau[:,None]) - np.logaddexp.outer(np.log(irn), np.log(rho_tmp))
-                logpdf = logratio - np.exp(logratio) + np.log(10) # correct for log10 to log
+                logpdf = logratio - np.exp(logratio) #+ np.log(10) # correct for log10 to log
                 # use Gumbel Max Trick 
                 # https://homes.cs.washington.edu/~ewein//blog/2022/03/04/gumbel-max/
                 gumbels = np.random.gumbel(size=(tau.shape[0],rho_tmp.shape[0]))
@@ -285,12 +285,14 @@ class PulsarBlockGibbs(object):
             # setup ptmcmc sampler
             outDir = f'./dummy_{self.pulsar_name}/'
             self.ptsampler_rn = ptmcmc(ndim=len(xnew), 
-                                       logl=self.get_lnlikelihood_red, logp=self.get_lnprior,
-                                       cov=0.01*np.diag(np.ones_like(xnew)), groups=None, 
-                                       verbose=False, resume=False, outDir=outDir)
+                                       logl=self.get_lnlikelihood_fullmarg, 
+                                       logp=self.get_lnprior,
+                                       cov=0.01*np.diag(np.ones_like(xnew)), 
+                                       groups=None, verbose=False, 
+                                       resume=False, outDir=outDir)
             # sample everything to estimate cov matrix and de buffer
-            self.ptsampler_rn.sample(xnew, iters, SCAMweight=30,
-                                     AMweight=15, DEweight=50, burn=iters-1)
+            self.ptsampler_rn.sample(xnew, iters, SCAMweight=30, AMweight=15, 
+                                     DEweight=50, isave=iters+1, burn=iters-1)
             xnew, _, _ = self.ptsampler_rn.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
             
             # select only red noise as sampling group from now on
@@ -298,15 +300,15 @@ class PulsarBlockGibbs(object):
             # grab only red noise portions of cov matrix
             self.ptsampler_rn.cov = self.ptsampler_rn.cov[rind,:][:,rind]
             
+            # update parameter group svd for jumps
             self.ptsampler_rn.U = [[]] * len(self.ptsampler_rn.groups)
             self.ptsampler_rn.S = [[]] * len(self.ptsampler_rn.groups)
-            # update parameter group svd for jumps
-            for ct, group in enumerate(self.ptsampler_rn.groups):
-                covgroup = np.zeros((len(group), len(group)))
-                for ii in range(len(group)):
-                    for jj in range(len(group)):
-                        covgroup[ii, jj] = self.ptsampler_rn.cov[group[ii], group[jj]]
-                self.ptsampler_rn.U[ct], self.ptsampler_rn.S[ct], _ = np.linalg.svd(covgroup)
+            self.ptsampler_rn.U[0], self.ptsampler_rn.S[0], _ = \
+                np.linalg.svd(self.ptsampler_rn.cov)
+
+            # update likelihood to be red-noise only
+            self.ptsampler_rn.logl = self.get_lnlikelihood_red
+            self.ptsampler_rn.logp = self.get_lnprior
             
             # delete the dummy directory that ptmcmcsampler makes
             shutil.rmtree(outDir)
@@ -319,8 +321,9 @@ class PulsarBlockGibbs(object):
             lnprob0 = self.get_lnlikelihood_red(xnew) + self.get_lnprior(xnew)
 
             # run the ptmcmc sampler for 20 steps
-            for _ in range(20):
-                xnew, lnlike0, lnprob0 = self.ptsampler_rn.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
+            step_max = 20
+            for _ in range(step_max):
+                xnew, _, _ = self.ptsampler_rn.PTMCMCOneStep(xnew, lnlike0, lnprob0, 0)
         
         return xnew
 
@@ -551,9 +554,11 @@ class PulsarBlockGibbs(object):
         tau = self._b[self.gwid]**2
         tau = tau[::2] + tau[1::2]
 
+        # get intrinsic red noise and gw psd values
         irn = np.array(self.red_sig.get_phi(params))[::2]
         gwsig = np.array(self.gw_sig.get_phi(params))[::2]
         
+        # compute the log-likelihood
         ratio = np.log(tau) - np.logaddexp(np.log(irn), np.log(gwsig))
         loglike = np.sum(ratio - np.exp(ratio)/2)
 
