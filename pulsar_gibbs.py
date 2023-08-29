@@ -552,15 +552,15 @@ class PulsarBlockGibbs(object):
 
         # adding together squares of GP coefficients
         tau = self._b[self.gwid]**2
-        tau = tau[::2] + tau[1::2]
+        tau = (tau[::2] + tau[1::2]) / 2
 
         # get intrinsic red noise and gw psd values
         irn = np.array(self.red_sig.get_phi(params))[::2]
         gwsig = np.array(self.gw_sig.get_phi(params))[::2]
         
         # compute the log-likelihood
-        ratio = np.log(tau) - np.logaddexp(np.log(irn), np.log(gwsig))
-        loglike = np.sum(ratio - np.exp(ratio)/2)
+        logratio = np.log(tau) - np.logaddexp(np.log(irn), np.log(gwsig))
+        loglike = np.sum(logratio - np.exp(logratio))
 
         return loglike
 
